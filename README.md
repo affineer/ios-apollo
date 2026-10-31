@@ -4,6 +4,8 @@
 
 Apple's open-source XNU kernel (xnu-8796), patched for this phone, boots the **unmodified iOS 16.7.16 (20H392) system of the iPhone X**: launchd, the system daemons, the window server, SpringBoard and the stock apps. No emulator, and no Android underneath.
 
+**Website and documentation:** [atechgeekdev.github.io/ios-apollo](https://atechgeekdev.github.io/ios-apollo/) (source: [`site/`](site/index.html)).
+
 > [!WARNING]
 > This is an experiment, not a daily-use phone OS. Most of Apple's security model is switched off, and installing the iOS root **erases Android's `userdata` partition**.
 
@@ -12,7 +14,7 @@ Apple's open-source XNU kernel (xnu-8796), patched for this phone, boots the **u
 ## Contents
 
 1. [Progress](#progress)
-2. [Being worked on now](#being-worked-on-now)
+2. [Missing for daily use](#missing-for-daily-use)
 3. [How it boots](#how-it-boots)
 4. [Getting started](#getting-started)
 5. [Boot options](#boot-options)
@@ -24,7 +26,7 @@ Apple's open-source XNU kernel (xnu-8796), patched for this phone, boots the **u
 
 ## Progress
 
-**Overall: `██████░░░░` 65%** (updated 2026-10-30)
+**Overall: `██████░░░░` 67%** (updated 2026-10-30)
 
 The percentages are rough estimates of how much of each part works on the phone today.
 
@@ -39,11 +41,13 @@ The percentages are rough estimates of how much of each part works on the phone 
 | Vibration | `███████░░░` 75% | ✅ Works | AW8697 motor: taps and ringtone patterns; duty-cycle limits protect the motor |
 | GPU drawing | `███████░░░` 75% | ✅ Works | Adreno 650 runs Mesa (OpenGL ES 3.2, freedreno); iOS's CoreAnimation draws the whole UI on it through a bridge, blur and materials included |
 | CPU | `████████░░` 85% | ✅ Works | All 8 cores (or a chosen set with `cpumask`); clocks follow the load with a 75 °C limit on the big cores (xnu 0153, boot 86) |
-| Smoothness (goal: 60 fps) | `██████░░░░` 65% | 🚧 In progress | 19–54 fps measured (boot 86); the copy to the panel takes ~4 ms on its own thread; backboardd's GL work and a busy CPU are the main costs |
-| Screen fit | `████████░░` 80% | 🧪 Testing | Full-panel mode: iOS draws 375×834 points, scaled by 0.96 onto the whole panel (boot 86); smoother, blended scaling for text and corners (xnu 0155) built, not yet booted |
+| Smoothness (goal: 60 fps) | `███████░░░` 70% | 🚧 In progress | 25–55 fps (boot 90); limited by background iOS daemons and widgets saturating the CPU and the 75 °C limit |
+| Screen fit | `█████████░` 90% | ✅ Works | Full-panel mode: iOS draws 375×834 points; the GPU scales each frame (filtered) into page-flipped screen buffers, no tearing and no CPU copy (boot 90) |
 | Backlight / brightness | `█████████░` 95% | ✅ Works | Brightness slider and Control Center drive the backlight (boot 86); smooth fade on lock/unlock |
-| Heat / power use | `████░░░░░░` 40% | 🚧 In progress | Boot 86: cores stay 40–70% busy even with the screen off, so they never cool down; xnu 0155 adds a per-thread CPU report to find the cause and stops touch polling while dark |
-| Microphone | `███░░░░░░░` 30% | ⏸️ Parked | The WCD938x codec comes up and iOS opens it, but the recording is silent |
+| Heat / power use | `████████░░` 80% | ✅ Works | Acceptable with every service on (boot 92): 0160 holds runaway background processes to 10% of a core; the CPU clocks follow the load with a 75 °C limit |
+| Microphone | `██████████` 100% | ✅ Works | WCD938x codec; recording works (Voice Memos, boot 93: fixed by xnu 0161's sandbox container paths / extension tokens) |
+| Files app | `█████████░` 90% | ✅ Works | "On My iPhone" (boot 104): extensions get container paths (0161), setup counts as finished (0165), and the HFS+ root is reported as APFS to the file provider service (libsweet-fix) |
+| Dynamic Island | `█████████░` 90% | ✅ Works | `mkadt.py --artwork-subtype 2556` (iPhone 14 Pro artwork type through the device tree; boot 104) |
 | Battery / charging status | `░░░░░░░░░░` 0% | ❌ Not started |  |
 | Sleep / standby | `░░░░░░░░░░` 0% | ❌ Not started | The panel goes dark when locked, but the phone never suspends |
 | USB, cameras, cellular, sensors, GPS, fingerprint | `░░░░░░░░░░` 0% | ❌ Not started |  |
@@ -54,12 +58,101 @@ The detailed engineering log, with every boot's results, is [`NOTES.md`](NOTES.m
 
 ---
 
-## Being worked on now
+## Missing for daily use
 
-| Patch | What it does | State |
-| --- | --- | --- |
-| **0155** | A per-thread CPU report every 10 s (`SWEET TOP`) to find what keeps the cores busy; blended (bilinear) screen scaling for clean text and corners; touch polled slowly while the screen is off; backlight writes retried | Built, not booted |
-| Next | Fix whatever `SWEET TOP` shows burning idle CPU; let the GPU do the screen scaling (no CPU copy: cooler and faster); GPU clock scaling; the microphone | Planned |
+<!-- roadmap:start -->
+50 features stand between this port and a phone for every day, listed one by one. Effort is a rough guess. The website shows the same list (site/roadmap.js).
+
+### Boot and system
+
+| Feature | Why it matters | Status | Effort |
+| --- | --- | --- | --- |
+| Boot without a computer | Every boot is a temporary fastboot boot from a PC. The shim has to be flashed to the boot partition, with a way back to Android. | ❌ Not started | Medium |
+| Correct date and time | The PM8150 real-time clock is not read: each boot starts in 1970 until the network sets the time. | ❌ Not started | Small |
+| Power off | iOS's shutdown only halts the kernel; the phone stays powered until the power button is held. | ❌ Not started | Small |
+| Restart from iOS | A restart from Settings or a crash should reset the phone through the PMIC. | ❌ Not started | Small |
+| No sudden resets | Boots 88 and 89 reset during normal use; the cause is not found yet. | 🚧 In progress | Medium |
+| No crash-looping system parts | Wallpapers and speech voices that need Metal crash and restart in a loop, costing CPU and battery. | 🟡 Partly works | Small |
+| Faster boot | About a minute from fastboot to the lock screen. | ❌ Not started | Medium |
+
+### Power and battery
+
+| Feature | Why it matters | Status | Effort |
+| --- | --- | --- | --- |
+| Battery level | The fuel gauge is not read: iOS shows no real battery percentage. | ❌ Not started | Medium |
+| Charging status | iOS does not know when a charger is connected or how fast it charges. | ❌ Not started | Medium |
+| Charger control | Charging current and temperature limits come from the bootloader's defaults, not from iOS. | ❌ Not started | Medium |
+| Sleep and standby | The CPU never suspends: a locked phone drains the battery almost as fast as one in use. | ❌ Not started | Large |
+| Screen-off power saving | Locking turns the backlight off, but the panel, display engine and GPU stay powered. | 🟡 Partly works | Medium |
+| GPU power management | The GPU runs at a fixed clock; it should scale with the load and idle when nothing is drawn. | 🟡 Partly works | Medium |
+| Battery temperature and health | Battery Health and temperature warnings have no data. | ❌ Not started | Small |
+
+### Calls, messages and location
+
+| Feature | Why it matters | Status | Effort |
+| --- | --- | --- | --- |
+| Cellular modem | The Snapdragon X55 modem is not started: no network at all. | ❌ Not started | Very large |
+| SIM card | SIM detection, PIN entry and carrier settings. | ❌ Not started | Large |
+| Phone calls | Voice calls over the modem, with the earpiece, microphone and audio routing. | ❌ Not started | Very large |
+| SMS | Text messages over the modem. | ❌ Not started | Large |
+| Mobile data | Internet over 4G/5G. | ❌ Not started | Large |
+| GPS and location | Maps, Find My and location services have only Wi-Fi to go on. | ❌ Not started | Large |
+
+### Connectivity
+
+| Feature | Why it matters | Status | Effort |
+| --- | --- | --- | --- |
+| USB connection to a computer | File transfer, Finder/iTunes and backups over USB-C. | ❌ Not started | Large |
+| USB networking and SSH | A network over the cable for debugging without recovery. | ❌ Not started | Medium |
+| USB-C headphones | Audio through USB-C adapters and headsets. | ❌ Not started | Medium |
+| Personal Hotspot | Sharing the phone's connection over Wi-Fi. | ❌ Not started | Medium |
+| AirDrop | Apple's peer-to-peer Wi-Fi (AWDL) is not supported by the Wi-Fi driver. | ❌ Not started | Very large |
+| Wi-Fi power saving | The Wi-Fi chip stays fully awake. | ❌ Not started | Medium |
+| NFC | The NFC controller is not used. | ❌ Not started | Large |
+
+### Sensors
+
+| Feature | Why it matters | Status | Effort |
+| --- | --- | --- | --- |
+| Accelerometer and gyroscope | Behind Qualcomm's sensor hub, which needs its firmware started first. | ❌ Not started | Large |
+| Screen rotation | Needs the accelerometer. | ❌ Not started | Medium |
+| Proximity sensor | Turns the screen off during calls. | ❌ Not started | Large |
+| Auto-brightness | Needs the ambient light sensor. | ❌ Not started | Large |
+| Compass | Needs the magnetometer. | ❌ Not started | Large |
+| Fingerprint unlock | The side fingerprint reader would have to stand in for Touch ID. | ❌ Not started | Very large |
+
+### Camera and media
+
+| Feature | Why it matters | Status | Effort |
+| --- | --- | --- | --- |
+| Rear cameras | Image sensors and Qualcomm's camera pipeline (Spectra ISP). | ❌ Not started | Very large |
+| Front camera | Same pipeline as the rear cameras. | ❌ Not started | Very large |
+| Flashlight | The LED driver sits on the PMIC; iOS's torch goes through the camera stack. | ❌ Not started | Medium |
+| Hardware video decoding | Videos are decoded by the CPU: hotter, slower, and some formats stutter. | ❌ Not started | Large |
+| Earpiece | The earpiece amplifier is brought up, but call audio is not routed to it. | 🟡 Partly works | Small |
+
+### Graphics and display
+
+| Feature | Why it matters | Status | Effort |
+| --- | --- | --- | --- |
+| Steady 60 fps | 25-55 fps today; the CPU and the CoreAnimation bridge are the limits. | 🚧 In progress | Medium |
+| Metal | Apps and games that need Metal do not run; iOS draws through an OpenGL ES bridge instead. | ❌ Not started | Very large |
+| 90 and 144 Hz | The panel runs at 60 Hz only. | ❌ Not started | Large |
+
+### Apps and Apple services
+
+| Feature | Why it matters | Status | Effort |
+| --- | --- | --- | --- |
+| Install your own apps | IPA installation (for example TrollStore) once the jailbreak userland is in place. | ❌ Not started | Medium |
+| Jailbreak and Sileo | Procursus in /var/jb and Sileo, installed onto the existing root. | 🚧 In progress | Medium |
+| Tweaks | A tweak injector (such as ElleKit) after the jailbreak. | ❌ Not started | Medium |
+| App Store apps | App Store apps are encrypted (FairPlay); this port cannot decrypt them. | ❌ Not started | Very large |
+| Apple ID and iCloud | Signing in needs a genuine device identity. | ❌ Not started | Very large |
+| Push notifications | Apple's push service needs device certificates. | ❌ Not started | Very large |
+| iMessage and FaceTime | Need activation with Apple. | ❌ Not started | Very large |
+| Siri and dictation | Voice assistant and speech recognition. | ❌ Not started | Large |
+| Passcode with data protection | The keybag is a stand-in: a passcode does not encrypt anything. | ❌ Not started | Large |
+<!-- roadmap:end -->
 
 ---
 
@@ -170,6 +263,7 @@ Boot options (boot-args) go in `--cmdline`. The most useful ones are below. Each
 | `cpus=N` | Start N cores (`cpus=1` is the safe fallback) |
 | `cpumask=M` | Start the cores in mask M instead (bit n = core n: 0–3 small, 4–6 big, 7 prime). `0xf1` = core 0 + the four big cores. Not together with `cpus=` |
 | `ufslogsecs=1` | Write the log to storage every second (for hangs) |
+| `sweetsetupdone=0` | Don't tell iOS that Setup Assistant has finished (0165; without it, fileproviderd and others wait for a setup that never runs) |
 | `sweetnull=A,B,…` | Copy what these programs print into the kernel log |
 | `sweettouch=0`, `sweetkeys=0` | Turn off touch or the buttons |
 
@@ -182,8 +276,11 @@ Boot options (boot-args) go in `--cmdline`. The most useful ones are below. Each
 | `sweetfb_fit=0` | Crop the iPhone X picture instead of scaling it to fit |
 | `sweetfb_height=2502` | Full-panel mode (0152): build the device tree with `mkadt.py --display-height 2502` and add `--files-from tools/root-files/mgcache-reset.txt` on the first boot |
 | `sweetfb_native=1` | iOS draws at 1080×2400 1:1 (360×800 points; iOS shows a red status bar). Needs `mkadt.py --native-display` |
+| `mkadt.py --artwork-subtype 2556` | (device tree, not a boot-arg) Dynamic Island: MobileGestalt's ArtworkDeviceSubType of the iPhone 14 Pro. Add `--files-from tools/root-files/mgcache-reset.txt` for the first boot with it; drop both to undo |
 | `sweetfb_stats=N` | Every N s, a `SWEET FB` line with frames a second and copy time (default 10) |
-| `sweetfb_smooth=0` | Nearest-pixel scaling instead of the blended (bilinear) default (0155): less CPU, rougher text |
+| `sweetscan=0` | Don't let the GPU scale frames into the flip buffers (0159); the CPU copies them |
+| `sweetflip=0` | Copy each frame into the shown buffer instead of page flipping (0156; tears) |
+| `sweetfb_smooth=1` | Blended (bilinear) scaling instead of nearest pixel: smoother text, but far slower on the CPU (0155/0157) |
 | `apollo_backlight=P` | Backlight: `0` leave it alone, `1`–`100` set a level, absent = keep the bootloader's level |
 | `apollo_backlight_fade_ms=N` | Lock/unlock fade length (default 300) |
 | `sweetbacklight=0` | Don't offer the backlight to iOS (the brightness slider does nothing) |
@@ -197,7 +294,9 @@ Boot options (boot-args) go in `--cmdline`. The most useful ones are below. Each
 | `sweetthermal=T` | Slow the big cores while the hottest core is over T °C (default 75; 0 = no limit) |
 | `sweetcpustats=N` | Every N s, a `SWEET CPUFREQ` line: clocks, load, temperatures (default 10) |
 | `sweettop=0` | No `SWEET TOP` line (the 8 threads that used the most CPU, with the stats line; 0155) |
-| `sweetddr=N` | Memory bus: `0` leave it alone, `1` follow the load (default), `2` always at top |
+| `sweetddr=N` | Memory bus: `0` leave it alone, `1` follow the load, `2` always at top (default since 0158) |
+| `sweettame=0` | No CPU budget for runaway background processes (0160). Tune with `sweettame_enter=35` (% of a core that counts as runaway), `sweettame_strikes=4` (5 s windows in a row), `sweettame_held=10` (% of a core allowed after) |
+| `sweetboost=N` | After a touch, every CPU at full speed (within the thermal limit) for N ms (default 250; 0 = off) |
 | `sweetddrlow=V` | The memory bus's idle level (default `0x800`); raise it if the screen flickers when idle |
 
 ### GPU
@@ -249,12 +348,13 @@ None of these files are in git. Each tool runs with the phone in the temporary r
 
 | Path | What's inside |
 | --- | --- |
-| `xnu/patches/` | The kernel: patches 0001–0155 on Apple's xnu-8796, applied in order by CI |
+| `xnu/patches/` | The kernel: patches 0001–0159 on Apple's xnu-8796, applied in order by CI |
 | `shim/` | The boot shim, packed as an Android boot image |
 | `wifi/` | The Linux compatibility layer the Wi-Fi driver (ath11k) is built on |
 | `userland/` | Programs for the phone: Mesa, the CoreAnimation bridge, the audio plug-in, the Bluetooth library, GPU tests ([details](userland/README.md)) |
 | `tools/` | Device tree builder, boot packer, iOS root builder, firmware pullers, log and crash tools |
-| `tools/root-files/` | One-boot file lists that add, move or remove files on the iOS root |
+| `tools/root-files/` | One-boot file lists that add, move or remove files on the iOS root (e.g. `quiet-on.txt` / `quiet-max.txt`: switch off daemons that waste CPU) |
+| `site/` | The project website (status and documentation), published to GitHub Pages by `pages.yml` |
 | `.github/workflows/` | CI: the kernel, the iOS programs, and an analysis job for iOS's system libraries (nothing from Apple is stored) |
 | `NOTES.md` | The engineering log: every boot's result, current state, next steps |
 

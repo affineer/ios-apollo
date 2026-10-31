@@ -3,7 +3,7 @@
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
 address comes from the sweet live FDT. Usage:
-  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--p3] [--native-display | --display-height N] [--touch-fw FW.bin] [--gmu-fw a650_gmu.bin]
+  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--p3] [--native-display | --display-height N] [--artwork-subtype N] [--touch-fw FW.bin] [--gmu-fw a650_gmu.bin]
             [--sqe-fw a650_sqe.fw] [--zap-mdt a650_zap.mdt] [--zap-seg a650_zap.b02] [--wifi-fw DIR|amss.bin] [--wifi-board FILE] [--wifi-mac aa:bb:cc:dd:ee:ff]
             [--bt-fw DIR]
 /product says the display is sRGB, not the iPhone X's P3 (--p3 keeps P3): see build().
@@ -91,7 +91,11 @@ BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 # the paths the kernel writes (xnu 0120/0121 bsd/dev/sweet_files.c sweet_files_prefixes)
 FILE_PREFIXES = ('/usr/local/', '/Library/Wallpaper/', '/private/var/', '/System/Library/xpc/',
                  # the sound (tools/root-files/audio-on.txt): iOS's VirtualAudio.plugin and our HakiosAudio.driver
-                 '/Library/Audio/Plug-Ins/', '/System/Library/Audio/Plug-Ins/HAL/')
+                 '/Library/Audio/Plug-Ins/', '/System/Library/Audio/Plug-Ins/HAL/',
+                 # app extensions that cannot work without Metal (tools/root-files/aegir-off.txt)
+                 '/System/Library/ExtensionKit/',
+                 # Sileo moved among the system apps (tools/root-files/sileo-system.txt)
+                 '/Applications/')
 D22AP_ADT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../research/ipsw-x/d22ap.adt')
 
 
@@ -125,7 +129,8 @@ def node(name, props=(), children=()):
 
 
 def build(seed=None, qemu=False, highmem=False, touch_fw=None, gmu_fw=None, gpu_extra=(), p3=False, files=(),
-          deletes=(), lists=(), wifi=(), macs=(), bt=(), moves=(), native_display=False, display_height=None):
+          deletes=(), lists=(), wifi=(), macs=(), bt=(), moves=(), native_display=False, display_height=None,
+          artwork_subtype=None):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     # Carve the panic log off the top so the kernel never allocates over it.
@@ -293,6 +298,13 @@ def build(seed=None, qemu=False, highmem=False, touch_fw=None, gmu_fw=None, gpu_
         # these two at the first boot of a root.
         product_props = [(k, cstr('sRGB') if k in ('artwork-display-gamut', 'display-gamut') else v)
                          for k, v in product_props]
+    if product_props and artwork_subtype is not None:
+        # --artwork-subtype N: MobileGestalt's ArtworkDeviceSubType comes from /product's artwork-device-subtype.
+        # 2556 (iPhone 14 Pro) is what makes iOS 16 draw the Dynamic Island (the "Nugget"/Cowabunga trick, done
+        # here at the source instead of in MobileGestalt's cache). Takes effect once the cache is rebuilt:
+        # add --files-from tools/root-files/mgcache-reset.txt for that one boot.
+        product_props = [(k, v) for k, v in product_props if k != 'artwork-device-subtype'] + \
+                        [('artwork-device-subtype', u32(artwork_subtype))]
     # /product/haptics, as the iPhone X has it (xnu 0146; hakios-apollo's mkidentity.py copies it too): MobileGestalt's
     # DeviceSupportsClosedLoopHaptics. With it iOS plays its vibrations and feedbacks as waveforms on the audio
     # server's "Actuator" device (userland/audio), which sweet_haptic.c plays on the motor (apollo_haptic=5).
@@ -495,6 +507,7 @@ if __name__ == '__main__':
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, touch_fw=touch_fw, gmu_fw=gmu_fw,
                  gpu_extra=gpu_extra, p3='--p3' in sys.argv, native_display='--native-display' in sys.argv,
                  display_height=int(sys.argv[sys.argv.index('--display-height') + 1]) if '--display-height' in sys.argv else None,
+                 artwork_subtype=int(sys.argv[sys.argv.index('--artwork-subtype') + 1]) if '--artwork-subtype' in sys.argv else None,
                  files=files, deletes=deletes, lists=lists, wifi=wifi, macs=macs, bt=bt,
                  moves=moves)
     blob = adt.serialize(root)
