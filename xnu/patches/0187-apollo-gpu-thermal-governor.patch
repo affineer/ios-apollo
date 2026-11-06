@@ -1,5 +1,5 @@
 --- a/bsd/dev/sweet_gpu.c
-+++ /tmp/xnu0187-fixed/bsd/dev/sweet_gpu.c	2026-11-06 11:33:52.838725755 +0500
++++ b/bsd/dev/sweet_gpu.c	2026-11-06 11:33:52.838725755 +0500
 @@ -1081,6 +1081,17 @@
  uint32_t sweet_gpu_last(void);
  void sweet_gpu_report(const char *why);
@@ -73,7 +73,7 @@
   * driver (userland/metal, command.cpp) reads to tell a submission a reset gave up from one that ran */
  static uint32_t sweet_gpu_recoveries;
 --- a/bsd/dev/sweet_cpufreq.c
-+++ /tmp/xnu0187-fixed/bsd/dev/sweet_cpufreq.c	2026-11-06 11:33:52.839443023 +0500
++++ b/bsd/dev/sweet_cpufreq.c	2026-11-06 11:33:52.839443023 +0500
 @@ -64,6 +64,9 @@
  void sweet_cpufreq_boost(uint32_t ms);                                                  /* (0160) SweetHID.cpp's touches */
  void sweet_cpufreq_init(void);
