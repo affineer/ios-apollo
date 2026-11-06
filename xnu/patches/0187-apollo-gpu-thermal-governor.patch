@@ -1,0 +1,144 @@
+--- a/bsd/dev/sweet_gpu.c
++++ /tmp/xnu0187-fixed/bsd/dev/sweet_gpu.c	2026-11-06 11:33:52.838725755 +0500
+@@ -1081,6 +1081,17 @@
+ uint32_t sweet_gpu_last(void);
+ void sweet_gpu_report(const char *why);
+ 
++/*
++ * (xnu 0187) khz per GPU level, for sweet_gpu_set_level() below: the same table step 15/17 build from
++ * the live qcom,gpu-pwrlevels (bsd/dev/sweet_gpu.c step 15's gpu_levels[]), kept here too because that
++ * one is local to sweet_gpu_probe(). Index 0 is "off" and is never asked for after boot.
++ */
++static const uint32_t gpu_level_khz[] = {
++	0, 305000, 400000, 441600, 490000, 525000, 587000,
++};
++#define GPU_LEVELS (sizeof(gpu_level_khz) / sizeof(gpu_level_khz[0]))
++bool sweet_gpu_set_level(unsigned level);
++
+ static struct {
+ 	bool on;
+ 	vm_offset_t gpu, smmu, ring_mem, scratch;
+@@ -1100,6 +1111,53 @@
+ 	return kept.on;
+ }
+ 
++/* (0187) Return the actual startup/current level; 0 means unknown or not ready. */
++unsigned
++sweet_gpu_current_level(void)
++{
++	if (!kept.on) {
++		return 0;
++	}
++	for (unsigned level = 1; level < GPU_LEVELS; ++level) {
++		if (gpu_level_khz[level] == kept.khz) {
++			return level;
++		}
++	}
++	return 0;
++}
++
++/*
++ * (xnu 0187) Re-vote the GPU's speed after boot: the same HFI_GX_BW_PERF_VOTE message step 17 sends
++ * once (a different table index; the GMU already has the whole table from step 16's HFI_PERF_TABLE,
++ * so nothing is reloaded). For sweet_cpufreq.c's thermal governor, which until now read the GPU's own
++ * TSENS sensor (TSENS_GPU) only to print it: the GPU ran at whatever sweetgpulevel asked for at boot,
++ * unmanaged, for as long as the phone has been kept on and drawing through Turnip/Metal.
++ * level 0 ("off") is refused: this only ever lowers or restores, never powers the core down.
++ * false: not kept on yet, a bad level, or the GMU refused/did not answer (kept.khz is unchanged
++ * either way, so a failed call here is safe to retry next sample).
++ */
++bool
++sweet_gpu_set_level(unsigned level)
++{
++	uint32_t perf_vote[4];
++
++	if (!kept.on || level < 1 || level >= GPU_LEVELS) {
++		return false;
++	}
++	if (gpu_level_khz[level] == kept.khz) {
++		return true;
++	}
++	perf_vote[0] = 0;
++	perf_vote[1] = 1;
++	perf_vote[2] = level;
++	perf_vote[3] = 0;
++	if (!hfi_send("a new GPU speed (thermal)", HFI_GX_BW_PERF_VOTE, perf_vote, 4)) {
++		return false;
++	}
++	kept.khz = gpu_level_khz[level];
++	return true;
++}
++
+ /* (xnu 0169) how many times sweet_gpu_recover() has reset the hung core this boot: msm's FAULTS, which the Metal
+  * driver (userland/metal, command.cpp) reads to tell a submission a reset gave up from one that ran */
+ static uint32_t sweet_gpu_recoveries;
+--- a/bsd/dev/sweet_cpufreq.c
++++ /tmp/xnu0187-fixed/bsd/dev/sweet_cpufreq.c	2026-11-06 11:33:52.839443023 +0500
+@@ -64,6 +64,9 @@
+ void sweet_cpufreq_boost(uint32_t ms);                                                  /* (0160) SweetHID.cpp's touches */
+ void sweet_cpufreq_init(void);
+ extern void thread_set_thread_name(thread_t thread, const char *name);          /* (0157) */
++extern bool sweet_gpu_set_level(unsigned level);                                        /* sweet_gpu.c (0187) */
++extern bool sweet_gpu_ready(void);                                                      /* sweet_gpu.c */
++extern unsigned sweet_gpu_current_level(void);                                          /* sweet_gpu.c (0187) */
+ 
+ #define CPUFREQ_DOMAIN_PA(d)  (0x18591000u + 0x1000u * (d))
+ #define CPUFREQ_DOMAINS       3u
+@@ -99,6 +102,9 @@
+ #define TSENS_GPU             15u
+ #define TEMP_NONE             (-100000)   /* no reading (the sensors give 12 bits) */
+ 
++#define GPU_GOV_LEVELS        7u          /* must match sweet_gpu.c's gpu_level_khz[] */
++#define GPU_GOV_FLOOR         2u          /* never under 400 MHz: level 1 (305 MHz) stalls the compositor */
++
+ static const char *const cpufreq_names[CPUFREQ_DOMAINS] = { "silver", "gold", "prime" };
+ 
+ struct cpufreq_domain {
+@@ -270,6 +276,7 @@
+ 	uint64_t idle_prev[GOV_CPUS] = { 0 }, at_prev = 0, period_abs, stats_abs, stats_since;
+ 	bool have_prev[GOV_CPUS] = { false };
+ 	unsigned samples = 0, quiet = 0, ddr_top_samples = 0, stat_samples = 0;
++	unsigned gpu_cap = 0, gpu_level = 0;                       /* (0187) initialized from actual boot level */
+ 	bool ddr_top = true;
+ 
+ 	(void)PE_parse_boot_argn("sweetthermal", &limit, sizeof(limit));
+@@ -385,6 +392,39 @@
+ 					cpufreq_set(dom, dom->cap);
+ 				}
+ 			}
++
++			/*
++			 * (0187) The GPU on its own sensor, the same way: one step down at 10 over (three at
++			 * 20 over), one step back at 5 under, never above sweetgpulevel's own ceiling (GPU_GOV_LEVELS-1
++			 * here; sweet_gpu_set_level() itself refuses 0) and never under GPU_GOV_FLOOR. Only once
++			 * sweet_gpu_ready(): nothing to vote on before the kept GPU exists.
++			 */
++			if (sweet_gpu_ready()) {
++				if (gpu_level == 0) {
++					unsigned current = sweet_gpu_current_level();
++					if (current != 0) {
++						gpu_level = current;
++						gpu_cap = current;       /* never exceed sweetgpulevel's actual startup level */
++					}
++				}
++				if (gpu_level != 0) {
++					int32_t gt = tsens_read(tsens0, TSENS_GPU);
++					int32_t gover = gt == TEMP_NONE ? TEMP_NONE : gt - (int32_t)limit * 10;
++					unsigned gpu_floor = gpu_cap < GPU_GOV_FLOOR ? gpu_cap : GPU_GOV_FLOOR;
++					if (gover != TEMP_NONE) {
++						unsigned want = gpu_level;
++						if (gover >= 0) {
++							unsigned steps = gover >= 200 ? 3u : 1u;
++							want = gpu_level > gpu_floor + steps ? gpu_level - steps : gpu_floor;
++						} else if (gover <= -50 && gpu_level < gpu_cap) {
++							want = gpu_level + 1;
++						}
++						if (want != gpu_level && sweet_gpu_set_level(want)) {
++							gpu_level = want;
++						}
++					}
++				}
++			}
+ 		}
+ 
+ 		if (stats_s != 0 && now - stats_since >= stats_abs && stat_samples != 0) {
