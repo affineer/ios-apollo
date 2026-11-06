@@ -1,6 +1,14 @@
 # project-BadApple (iOS 16 on the Xiaomi Mi 10T 5G, apollo) - working notes
 
 ## Agent handoff / active work
+ 
+### >>> UFS MILESTONE 5 (2026-10-31): controller, GPT and read-only partition probing verified <<<
+
+**Observed on device:** shim milestone 4 started successfully; no SWEETXNU payload was supplied, so XNU did not boot. Milestone 5 initialized the UFS host controller. TEST UNIT READY, READ CAPACITY(10), LUN0 query and READ(10) completed with `rc=0` and zero OCS/status errors. The read-only probe found the protective MBR signature (`0xAA55`, type `0xEE`), GPT signature (`EFI PART`), and 64 GPT entries starting at LBA 2. It listed partition metadata and read one block at the start of `userdata`, `cust` and `cache` to check filesystem signatures; `cust` and `cache` reported ext4, while `userdata` reported `other` (not a recognised f2fs/ext4 signature in that block; not evidence of damage).
+**Source audit:** `shim/ufs.c` uses only SCSI TEST UNIT READY (`0x00`), READ CAPACITY(10) (`0x25`) and READ(10) (`0x28`) in this probe. No SCSI WRITE command is present in the file. UFS controller-register writes configure the host controller and are not storage-media writes.
+**Afterward:** device reset and booted Android normally. No partition writes, formatting or GPT changes were performed.
+**Next:** preserve this working Android state. Documented UFS read path is verified; do not add broader partition reads or attempt writes without a separate safety review and explicit approval.
+
 
 ### >>> REVIEW (2026-11-05, user: "look into everything for conflicts and bugs and fix"; Metal agent) <<<
 
