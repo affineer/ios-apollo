@@ -1,6 +1,16 @@
 --- a/bsd/dev/sweet_gpu.c
-+++ b/bsd/dev/sweet_gpu.c	2026-11-06 11:33:52.838725755 +0500
-@@ -1081,6 +1081,17 @@
++++ b/bsd/dev/sweet_gpu.c
+@@ -1069,6 +1069,9 @@
+ 
+ void SweetGPUStart(void);                     /* iokit/Kernel/arm/SweetGPU.cpp */
+ bool sweet_gpu_ready(void);
++bool sweet_gpu_service_ready(void);
++bool sweet_gpu_state_lock(void);
++void sweet_gpu_state_unlock(void);
+ bool sweet_gpu_parameter(uint32_t which, uint64_t *value);
+ uint64_t sweet_gpu_address(uint64_t size);
+ void sweet_gpu_address_free(uint64_t address, uint64_t size);
+@@ -1081,6 +1084,17 @@
  uint32_t sweet_gpu_last(void);
  void sweet_gpu_report(const char *why);
  
@@ -18,7 +28,7 @@
  static struct {
  	bool on;
  	vm_offset_t gpu, smmu, ring_mem, scratch;
-@@ -1100,6 +1111,53 @@
+@@ -1100,6 +1114,79 @@
  	return kept.on;
  }
  
@@ -26,11 +36,20 @@
 +unsigned
 +sweet_gpu_current_level(void)
 +{
-+	if (!kept.on) {
++	uint32_t khz;
++
++	if (!sweet_gpu_state_lock()) {
 +		return 0;
 +	}
++	if (!kept.on) {
++		sweet_gpu_state_unlock();
++		return 0;
++	}
++	khz = kept.khz;
++	sweet_gpu_state_unlock();
++
 +	for (unsigned level = 1; level < GPU_LEVELS; ++level) {
-+		if (gpu_level_khz[level] == kept.khz) {
++		if (gpu_level_khz[level] == khz) {
 +			return level;
 +		}
 +	}
@@ -52,20 +71,37 @@
 +{
 +	uint32_t perf_vote[4];
 +
-+	if (!kept.on || level < 1 || level >= GPU_LEVELS) {
++	uint32_t current_khz;
++
++	if (level < 1 || level >= GPU_LEVELS || !sweet_gpu_service_ready()) {
 +		return false;
 +	}
-+	if (gpu_level_khz[level] == kept.khz) {
++	if (!sweet_gpu_state_lock()) {
++		return false;
++	}
++	if (!kept.on) {
++		sweet_gpu_state_unlock();
++		return false;
++	}
++	current_khz = kept.khz;
++	sweet_gpu_state_unlock();
++
++	if (gpu_level_khz[level] == current_khz) {
 +		return true;
 +	}
 +	perf_vote[0] = 0;
 +	perf_vote[1] = 1;
 +	perf_vote[2] = level;
 +	perf_vote[3] = 0;
++	/* Never hold gGPULock during hfi_send(): the GMU may take up to 1 s to answer. */
 +	if (!hfi_send("a new GPU speed (thermal)", HFI_GX_BW_PERF_VOTE, perf_vote, 4)) {
 +		return false;
 +	}
++	if (!sweet_gpu_service_ready() || !sweet_gpu_state_lock()) {
++		return false;
++	}
 +	kept.khz = gpu_level_khz[level];
++	sweet_gpu_state_unlock();
 +	return true;
 +}
 +
@@ -73,13 +109,13 @@
   * driver (userland/metal, command.cpp) reads to tell a submission a reset gave up from one that ran */
  static uint32_t sweet_gpu_recoveries;
 --- a/bsd/dev/sweet_cpufreq.c
-+++ b/bsd/dev/sweet_cpufreq.c	2026-11-06 11:33:52.839443023 +0500
++++ b/bsd/dev/sweet_cpufreq.c
 @@ -64,6 +64,9 @@
  void sweet_cpufreq_boost(uint32_t ms);                                                  /* (0160) SweetHID.cpp's touches */
  void sweet_cpufreq_init(void);
  extern void thread_set_thread_name(thread_t thread, const char *name);          /* (0157) */
 +extern bool sweet_gpu_set_level(unsigned level);                                        /* sweet_gpu.c (0187) */
-+extern bool sweet_gpu_ready(void);                                                      /* sweet_gpu.c */
++extern bool sweet_gpu_service_ready(void);                                                      /* sweet_gpu.c */
 +extern unsigned sweet_gpu_current_level(void);                                          /* sweet_gpu.c (0187) */
  
  #define CPUFREQ_DOMAIN_PA(d)  (0x18591000u + 0x1000u * (d))
@@ -110,10 +146,10 @@
 +			/*
 +			 * (0187) The GPU on its own sensor, the same way: one step down at 10 over (three at
 +			 * 20 over), one step back at 5 under, never above sweetgpulevel's own ceiling (GPU_GOV_LEVELS-1
-+			 * here; sweet_gpu_set_level() itself refuses 0) and never under GPU_GOV_FLOOR. Only once
-+			 * sweet_gpu_ready(): nothing to vote on before the kept GPU exists.
++			 * here; sweet_gpu_set_level() itself refuses 0) and never under GPU_GOV_FLOOR. Only while
++			 * sweet_gpu_service_ready(): nothing to vote on before the kept GPU is operational.
 +			 */
-+			if (sweet_gpu_ready()) {
++			if (sweet_gpu_service_ready()) {
 +				if (gpu_level == 0) {
 +					unsigned current = sweet_gpu_current_level();
 +					if (current != 0) {
@@ -142,3 +178,63 @@
  		}
  
  		if (stats_s != 0 && now - stats_since >= stats_abs && stat_samples != 0) {
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -177,6 +177,7 @@
+ #define GPU_SURFACE_WRITES      32              /* surfaces whose last GPU write the display may still wait for */
+ 
+ static IOLock *gGPULock;                        /* around everything that is the GPU's (sweet_gpu_...) */
++static bool gGPUServiceReady;                    /* published only after SweetGPU::start succeeds */
+ static bool gGPUStopped;                        /* the core stopped answering: nothing is waited for again */
+ static struct {
+ 	uint32_t id, fence;                     /* a surface the GPU was told to write by submission `fence` */
+@@ -374,6 +375,10 @@
+ 	if (!gpu->start(provider)) {
+ 		gpu->detach(provider);
+ 		IOLog("SweetGPU: the service did not start\n");
++	} else {
++		IOLockLock(gGPULock);
++		gGPUServiceReady = true;
++		IOLockUnlock(gGPULock);
+ 	}
+ 	gpu->release();
+ 	sweet_accelerator_start(provider);      /* (0170) the Vulkan / Metal service, with boot-arg sweetmtl */
+@@ -384,6 +389,38 @@
+ 	}
+ }
+ 
++/* C bridge for sweet_gpu.c: use the same lock as GPU service operations. */
++extern "C" bool
++sweet_gpu_state_lock(void)
++{
++	if (gGPULock == NULL) {
++		return false;
++	}
++	IOLockLock(gGPULock);
++	return true;
++}
++
++extern "C" void
++sweet_gpu_state_unlock(void)
++{
++	if (gGPULock != NULL) {
++		IOLockUnlock(gGPULock);
++	}
++}
++
++extern "C" bool
++sweet_gpu_service_ready(void)
++{
++	bool ready;
++
++	if (!sweet_gpu_state_lock()) {
++		return false;
++	}
++	ready = gGPUServiceReady && !gGPUStopped;
++	sweet_gpu_state_unlock();
++	return ready;
++}
++
+ /*
+  * (xnu 0170) The GPU for the Turnip client (SweetAccelerator.cpp, the NativeAdreno ABI): under gGPULock as Mesa's
+  * submissions are, so the two share the ring, and a hang in either is recovered the same way (0163).
